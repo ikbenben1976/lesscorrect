@@ -242,15 +242,24 @@ async def _run_agent_claude_cli(
     """
     console.print(f"\n[dim]({agent_def.name} via Claude CLI)[/dim]\n")
 
-    # Write system prompt to a temp file to avoid shell length limits
+    # Write system prompt to a temp file to avoid shell length limits.
+    # Use --append-system-prompt-file to keep Claude Code's default tool
+    # instructions (Read, Write, Edit, Bash, etc.) while adding our
+    # agent-specific role and context.
     import tempfile
     prompt_file = Path(tempfile.mktemp(suffix=".txt", prefix="correctless-prompt-"))
-    prompt_file.write_text(agent_def.system_prompt)
+    prompt_file.write_text(
+        "IMPORTANT: You are a Correctless agent. Focus ONLY on the task "
+        "given below. Do NOT address uncommitted changes, repo state, or "
+        "anything outside your assigned task. Execute your instructions "
+        "and produce the requested output.\n\n"
+        + agent_def.system_prompt
+    )
 
     cmd = [
         "claude", "-p",
         "--model", agent_def.model,
-        "--system-prompt-file", str(prompt_file),
+        "--append-system-prompt-file", str(prompt_file),
         "--output-format", "text",
     ]
 
