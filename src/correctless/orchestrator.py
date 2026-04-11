@@ -123,8 +123,27 @@ def _run_tests(config: ProjectConfig) -> tuple[int, str]:
 
 
 # ---------------------------------------------------------------------------
-# Agent runner
+# Agent runner — 3-tier fallback chain
 # ---------------------------------------------------------------------------
+#
+# Agent SDK → Messages API → Claude CLI (always available)
+#
+# Each tier provides the same interface: run an agent with a system prompt,
+# tool restrictions, and a user message. Higher tiers have better isolation
+# (SDK enforces tools at API level; CLI spawns a separate process).
+
+import shutil
+
+def _has_anthropic_key() -> bool:
+    """Check if an Anthropic API key is available."""
+    import os
+    return bool(os.environ.get("ANTHROPIC_API_KEY"))
+
+
+def _has_claude_cli() -> bool:
+    """Check if the claude CLI is on PATH."""
+    return shutil.which("claude") is not None
+
 
 async def run_agent(
     agent_def: agent_defs.AgentDef,
@@ -133,19 +152,18 @@ async def run_agent(
 ) -> str:
     """Run an agent and return its final text output.
 
-    This is where the Agent SDK integration happens. Each call creates a
-    completely new agent session with:
-    - The agent's specific system prompt
-    - Only the tools listed in allowed_tools
-    - A fresh context window (no history from other phases)
+    Fallback chain:
+    1. Agent SDK (claude_agent_sdk) — best isolation, tool enforcement at API level
+    2. Messages API (anthropic) — needs ANTHROPIC_API_KEY, no tool execution
+    3. Claude CLI (claude -p) — always available in Claude Code, full tool support
 
-    For now, this uses the claude_agent_sdk.query() interface. When Managed
-    Agents multiagent goes GA, this can switch to cloud-hosted sessions for
-    even stronger isolation (separate containers per agent).
+    Each call creates a completely new agent session with a fresh context window.
     """
+    # Tier 1: Agent SDK
     try:
         from claude_agent_sdk import query, ClaudeAgentOptions
 
+        console.print(f"\n[dim]({agent_def.name} via Agent SDK)[/dim]\n")
         full_output = []
         async for message in query(
             prompt=user_message,
@@ -168,23 +186,34 @@ async def run_agent(
         return "\n".join(full_output)
 
     except ImportError:
-        # Fallback: use the Anthropic Messages API directly.
-        # This loses tool execution but preserves the workflow structure
-        # and tool-restriction intent for when the SDK is available.
+        pass
+
+    # Tier 2: Messages API (only if API key is available)
+    if _has_anthropic_key():
         return await _run_agent_messages_api(agent_def, user_message)
+
+    # Tier 3: Claude CLI (always available in Claude Code environments)
+    if _has_claude_cli():
+        return await _run_agent_claude_cli(agent_def, user_message, repo_root)
+
+    raise WorkflowError(
+        "No agent execution backend available. Install one of:\n"
+        "  1. claude-agent-sdk (pip install claude-agent-sdk)\n"
+        "  2. Set ANTHROPIC_API_KEY environment variable\n"
+        "  3. Install Claude CLI (available in Claude Code)"
+    )
 
 
 async def _run_agent_messages_api(
     agent_def: agent_defs.AgentDef,
     user_message: str,
 ) -> str:
-    """Fallback: use the Messages API when Agent SDK isn't installed."""
+    """Tier 2: Use the Anthropic Messages API directly."""
     import anthropic
 
     client = anthropic.AsyncAnthropic()
 
-    console.print(f"\n[dim]({agent_def.name} via Messages API — "
-                  f"install claude-agent-sdk for full tool support)[/dim]\n")
+    console.print(f"\n[dim]({agent_def.name} via Messages API)[/dim]\n")
 
     response = await client.messages.create(
         model=agent_def.model,
@@ -198,6 +227,75 @@ async def _run_agent_messages_api(
     )
     console.print(Markdown(text))
     return text
+
+
+async def _run_agent_claude_cli(
+    agent_def: agent_defs.AgentDef,
+    user_message: str,
+    repo_root: Path | None = None,
+) -> str:
+    """Tier 3: Use the Claude CLI to spawn a subagent process.
+
+    This is the v3-compatible fallback that's always available inside
+    Claude Code. Each agent runs as a separate `claude -p` invocation
+    with its own system prompt and tool restrictions.
+    """
+    console.print(f"\n[dim]({agent_def.name} via Claude CLI)[/dim]\n")
+
+    # Write system prompt to a temp file to avoid shell length limits
+    import tempfile
+    prompt_file = Path(tempfile.mktemp(suffix=".txt", prefix="correctless-prompt-"))
+    prompt_file.write_text(agent_def.system_prompt)
+
+    cmd = [
+        "claude", "-p",
+        "--model", agent_def.model,
+        "--system-prompt-file", str(prompt_file),
+        "--output-format", "text",
+    ]
+
+    # Apply tool restrictions
+    if agent_def.allowed_tools:
+        cmd.extend(["--allowed-tools", " ".join(agent_def.allowed_tools)])
+
+    # The user message is passed via stdin to avoid shell escaping issues
+    cwd = str(repo_root) if repo_root else None
+
+    try:
+        proc = await asyncio.subprocess.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
+        )
+
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(input=user_message.encode()),
+            timeout=600,  # 10 minute timeout for agent execution
+        )
+
+        output = stdout.decode()
+
+        if proc.returncode != 0:
+            err = stderr.decode()
+            console.print(f"[yellow]Agent warning (exit {proc.returncode}):[/yellow] {err[:500]}")
+
+        if output:
+            console.print(Markdown(output))
+
+        return output
+
+    except asyncio.TimeoutError:
+        console.print("[red]Agent timed out after 10 minutes[/red]")
+        if proc:
+            proc.kill()
+        return "(agent timed out)"
+    except FileNotFoundError:
+        raise WorkflowError("Claude CLI not found. Is Claude Code installed?")
+    finally:
+        # Clean up temp prompt file
+        prompt_file.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
