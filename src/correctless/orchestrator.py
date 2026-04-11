@@ -419,7 +419,18 @@ async def run_spec(store: WorkflowStore, task: str) -> WorkflowState:
     )
 
     console.print(f"\n[bold]Spec Agent[/bold] — writing specification for: {task}\n")
-    await run_agent(agent, f"Write a spec for: {task}", repo_root=repo)
+    await run_agent(
+        agent,
+        f"Write a spec for: {task}\n\n"
+        f"IMPORTANT: You are running in non-interactive mode. Do NOT ask "
+        f"clarifying questions. Instead, make reasonable assumptions and "
+        f"document them in the spec's 'Open Questions' section. Write the "
+        f"spec directly to the file: {state.spec_file}\n\n"
+        f"Use the Edit or Write tool to update the spec file with the full "
+        f"specification including Rules (R-xxx), Prohibitions (P-xxx), Edge "
+        f"Cases, and Open Questions sections.",
+        repo_root=repo,
+    )
 
     # Advance to review
     state = store.load()  # reload in case agent wrote to state
@@ -446,7 +457,14 @@ async def run_review(store: WorkflowStore) -> WorkflowState:
     )
 
     console.print("\n[bold]Review Agent[/bold] — reading spec cold, looking for problems\n")
-    result = await run_agent(agent, "Review this spec. Find what's wrong.", repo_root=repo)
+    result = await run_agent(
+        agent,
+        "Review this spec. Find what's wrong.\n\n"
+        "You are running in non-interactive mode. Produce your complete "
+        "review with all findings in a single response. End with a clear "
+        "verdict: APPROVE or REVISE.",
+        repo_root=repo,
+    )
 
     # Record findings from this review into the knowledge store
     knowledge = KnowledgeStore(repo)
@@ -480,7 +498,14 @@ async def run_tdd(store: WorkflowStore) -> WorkflowState:
         agent = agent_defs.test_agent(spec_content, config.model_dump())
 
         console.print("\n[bold red]RED Phase[/bold red] — Test Agent writing failing tests\n")
-        await run_agent(agent, "Write failing tests for every rule in the spec.", repo_root=repo)
+        await run_agent(
+            agent,
+            "Write failing tests for every rule in the spec. "
+            "You are running in non-interactive mode. Write the test files "
+            "directly using the Write or Edit tool. Then run the tests to "
+            "verify they fail with test failures (not build errors).",
+            repo_root=repo,
+        )
 
         # Gate: tests must fail (not build errors)
         console.print("\n[dim]Verifying tests fail...[/dim]")
@@ -504,7 +529,13 @@ async def run_tdd(store: WorkflowStore) -> WorkflowState:
         agent = agent_defs.impl_agent(spec_content, test_content, config.model_dump())
 
         console.print("\n[bold green]GREEN Phase[/bold green] — Impl Agent making tests pass\n")
-        await run_agent(agent, "Make all failing tests pass.", repo_root=repo)
+        await run_agent(
+            agent,
+            "Make all failing tests pass. You are running in non-interactive "
+            "mode. Write the implementation directly using Write or Edit tools. "
+            "Do NOT modify test files. Run the tests to verify they pass.",
+            repo_root=repo,
+        )
 
         # Gate: tests must pass
         console.print("\n[dim]Verifying tests pass...[/dim]")
@@ -534,7 +565,13 @@ async def run_tdd(store: WorkflowStore) -> WorkflowState:
         )
 
         console.print(f"\n[bold cyan]QA Phase[/bold cyan] — QA Agent reviewing (round {state.qa_rounds + 1})\n")
-        result = await run_agent(agent, "Review the spec, tests, and implementation. Find bugs.", repo_root=repo)
+        result = await run_agent(
+            agent,
+            "Review the spec, tests, and implementation. Find bugs. "
+            "You are running in non-interactive mode. Produce your complete "
+            "review with all findings. End with: PASS or FAIL.",
+            repo_root=repo,
+        )
 
         # Record QA findings
         knowledge = KnowledgeStore(repo)
@@ -584,7 +621,14 @@ async def run_verify(store: WorkflowStore) -> WorkflowState:
     agent = agent_defs.verify_agent(spec_content, impl_content, config.model_dump())
 
     console.print("\n[bold]Verify Agent[/bold] — checking spec-to-code correspondence\n")
-    result = await run_agent(agent, "Verify the implementation matches the spec.", repo_root=repo)
+    result = await run_agent(
+        agent,
+        "Verify the implementation matches the spec. "
+        "You are running in non-interactive mode. Build the coverage "
+        "matrix and produce the verification report. Write it to "
+        ".correctless/verification/. End with: PASS or FAIL.",
+        repo_root=repo,
+    )
 
     if "FAIL" in result.upper():
         state.advance(Phase.TDD_GREEN)
@@ -616,7 +660,13 @@ async def run_docs(store: WorkflowStore) -> WorkflowState:
     )
 
     console.print("\n[bold]Docs Agent[/bold] — updating project documentation\n")
-    await run_agent(agent, "Update documentation for this feature.", repo_root=repo)
+    await run_agent(
+        agent,
+        "Update documentation for this feature. "
+        "You are running in non-interactive mode. Update the doc files "
+        "directly using Write or Edit tools.",
+        repo_root=repo,
+    )
 
     state.advance(Phase.DONE)
     store.save(state)
